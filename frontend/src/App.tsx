@@ -5,7 +5,7 @@ import {
   Loader2, Sparkles, Layers, CheckCircle2, Circle, AlertCircle, X, Globe2,
   Bot, User, Zap, GitBranch, Clock, MoreHorizontal, Pencil, RefreshCw,
 } from 'lucide-react'
-import { api, preparePreview, type Project, type Message, type Plan, type Activity, type Version } from './api'
+import { api, preparePreview, type Project, type Message, type Plan, type Activity, type Version, type Quality } from './api'
 import { loadSnapshot, saveDetail, upsertProject, saveSnapshot } from './storage'
 
 const AGENT_META: Record<string, { color: string; bg: string; short: string }> = {
@@ -62,6 +62,7 @@ export default function App() {
   const [current, setCurrent] = useState<Project | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [versions, setVersions] = useState<Version[]>([])
+  const [quality, setQuality] = useState<Quality | null>(null)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
@@ -157,6 +158,7 @@ export default function App() {
     setCurrent(p)
     setMessages(msgs)
     setVersions(vers)
+    setQuality(p.quality || null)
     setPreviewHtml(html)
     setView('preview')
     setError('')
@@ -190,10 +192,11 @@ export default function App() {
         agent: 'Alex · Engineer',
         kind: 'result',
         content: `已完成应用生成，共 ${res.plan.features?.length || 0} 项功能，版本 V${res.version_no}。`,
-        extra: { plan: res.plan, steps: res.steps, version_no: res.version_no },
+        extra: { plan: res.plan, steps: res.steps, version_no: res.version_no, quality: res.quality },
       }
       setMessages(m => [...m, detail])
       setMockMode(res.mock_mode)
+      setQuality(res.quality || null)
       await Promise.all([refreshProjects(), api.getProject(current.id).then(p => {
         setVersions(p.versions || [])
         setCurrent(p)
@@ -225,9 +228,10 @@ export default function App() {
       const resultMsg: Message = {
         role: 'agent', agent: 'Alex · Engineer', kind: 'result',
         content: `修改已完成，已生成版本 V${res.version_no}。`,
-        extra: { steps: res.steps, version_no: res.version_no },
+        extra: { steps: res.steps, version_no: res.version_no, quality: res.quality },
       }
       setMessages(m => [...m, resultMsg])
+      setQuality(res.quality || null)
       await Promise.all([refreshProjects(), api.getProject(current.id).then(p => {
         setVersions(p.versions || [])
         setCurrent(p)
@@ -328,6 +332,11 @@ export default function App() {
               {current.current_html && (
                 <span className="flex items-center gap-1 text-[11px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full ml-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />已生成
+                </span>
+              )}
+              {quality && (
+                <span className="flex items-center gap-1 text-[11px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full ml-1" title="生成应用质量评分">
+                  质量 {quality.total} · {quality.grade}
                 </span>
               )}
             </>
@@ -732,7 +741,9 @@ function ActivityRow({ step }: { step: Activity }) {
 
 function ResultCard({ msg, meta }: { msg: Message; meta: { color: string; bg: string; short: string } }) {
   const [open, setOpen] = useState(false)
+  const [qualityOpen, setQualityOpen] = useState(false)
   const steps = msg.extra?.steps || []
+  const quality = msg.extra?.quality
   return (
     <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
       <div className="px-3 py-2.5">
@@ -741,6 +752,35 @@ function ResultCard({ msg, meta }: { msg: Message; meta: { color: string; bg: st
           <CheckCircle2 size={13} className="text-emerald-500 shrink-0 mt-0.5" />
           {msg.content}
         </div>
+        {quality && (
+          <div className="mt-2 rounded-lg border border-indigo-100 bg-indigo-50/40 overflow-hidden">
+            <button onClick={() => setQualityOpen(o => !o)} className="w-full flex items-center gap-2 px-2.5 py-2 text-left">
+              <span className="text-[11px] font-medium text-gray-600">生成质量评分</span>
+              <span className={`text-[13px] font-semibold ${quality.total >= 85 ? 'text-emerald-600' : quality.total >= 70 ? 'text-indigo-600' : 'text-amber-600'}`}>
+                {quality.total}
+              </span>
+              <span className="text-[11px] text-gray-400">/ 100 · {quality.grade} 级</span>
+              <span className="ml-auto text-indigo-500">{qualityOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
+            </button>
+            {qualityOpen && (
+              <div className="px-2.5 pb-2.5 space-y-1.5 fade-up">
+                {quality.dimensions.map(d => (
+                  <div key={d.key}>
+                    <div className="flex items-center justify-between text-[10px] mb-0.5">
+                      <span className="text-gray-600">{d.label} <span className="text-gray-400">· 权重 {d.weight}%</span></span>
+                      <span className="font-medium text-gray-700">{d.score.toFixed(0)}</span>
+                    </div>
+                    <div className="h-1 rounded-full bg-gray-200 overflow-hidden">
+                      <div className={`h-full rounded-full ${d.score >= 80 ? 'bg-emerald-500' : d.score >= 60 ? 'bg-indigo-500' : 'bg-amber-500'}`} style={{ width: `${d.score}%` }} />
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">{d.note}</div>
+                  </div>
+                ))}
+                <div className="text-[10px] text-gray-400 pt-1 border-t border-indigo-100">启发式静态评估 · 供参考，非模型自评</div>
+              </div>
+            )}
+          </div>
+        )}
         {steps.length > 0 && (
           <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-700 mt-2">
             {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}

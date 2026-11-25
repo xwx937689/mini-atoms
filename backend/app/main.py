@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from . import config, database as db, mock
 from .llm import LLMClient, LLMError
 from .validator import static_check
+from .scoring import score_app
 
 app = FastAPI(title="Mini Atoms API", version="1.0.0")
 app.add_middleware(
@@ -100,6 +101,10 @@ async def get_project(project_id: str):
     p = _ok(project_id)
     p["messages"] = db.get_messages(project_id)
     p["versions"] = db.list_versions(project_id)
+    if p.get("current_html"):
+        plan_msg = next((m for m in p["messages"] if m.get("kind") == "plan"), None)
+        plan = (plan_msg.get("extra") or {}).get("plan") if plan_msg else None
+        p["quality"] = score_app(p["current_html"], plan)
     return p
 
 
@@ -160,6 +165,8 @@ async def generate(body: GenerateIn):
 
         steps.append(_activity("Reviewer", "质量校验通过", "Run check", "HTML 结构完整，脚本可运行"))
 
+        quality = score_app(html, plan)
+
         version_no = db.next_version_no(body.project_id)
         name = plan.get("app_name") or p["name"]
         db.update_project_html(body.project_id, html, prompt=prompt, name=name)
@@ -175,6 +182,7 @@ async def generate(body: GenerateIn):
             "plan": plan,
             "html": html,
             "steps": steps,
+            "quality": quality,
             "mock_mode": not llm.ready,
         }
     except Exception as e:
@@ -225,11 +233,13 @@ async def edit_app(body: EditIn):
                 raise LLMError("修改结果校验失败：" + "；".join(check["issues"][:3]))
         steps.append(_activity("Reviewer", "修改后校验通过，保留全部既有功能", "Run check", f"HTML {len(html)} 字符"))
 
+        quality = score_app(html, None)
+
         version_no = db.next_version_no(body.project_id)
         db.update_project_html(body.project_id, html)
         db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
         db.add_message(body.project_id, "agent", "修改已完成并生成新版本。", agent="Alex · Engineer", kind="result", extra={"steps": steps, "version_no": version_no})
-        return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "mock_mode": not llm.ready}
+        return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "quality": quality, "mock_mode": not llm.ready}
     except Exception as e:
         # Only fall back on transport failure. A validation failure after a successful model
         # call must NOT wipe the previous good version with generic mock output.

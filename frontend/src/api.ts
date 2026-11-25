@@ -8,6 +8,7 @@ export interface Project {
   version_count?: number
   messages?: Message[]
   versions?: Version[]
+  quality?: Quality
 }
 
 export interface Activity {
@@ -40,8 +41,22 @@ export interface Message {
     steps?: Activity[]
     version_no?: number
     slug?: string
+    quality?: Quality
   }
   created_at?: string
+}
+
+export interface QualityDimension {
+  key: string
+  label: string
+  weight: number
+  score: number
+  note: string
+}
+export interface Quality {
+  total: number
+  grade: string
+  dimensions: QualityDimension[]
 }
 
 export interface Version {
@@ -103,11 +118,11 @@ export const api = {
     req<Project>(`/api/projects/${id}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteProject: (id: string) => req<{ ok: boolean }>(`/api/projects/${id}`, { method: 'DELETE' }),
   generate: (project_id: string, prompt: string) =>
-    req<{ ok: boolean; version_no: number; plan: Plan; html: string; steps: Activity[]; mock_mode: boolean }>(
+    req<{ ok: boolean; version_no: number; plan: Plan; html: string; steps: Activity[]; quality?: Quality; mock_mode: boolean; fallback?: boolean }>(
       '/api/generate', { method: 'POST', body: JSON.stringify({ project_id, prompt }) }
     ),
   edit: (project_id: string, instruction: string) =>
-    req<{ ok: boolean; version_no: number; html: string; steps: Activity[] }>(
+    req<{ ok: boolean; version_no: number; html: string; steps: Activity[]; quality?: Quality }>(
       '/api/edit', { method: 'POST', body: JSON.stringify({ project_id, instruction }) }
     ),
   versions: (project_id: string) => req<Version[]>(`/api/projects/${project_id}/versions`),
