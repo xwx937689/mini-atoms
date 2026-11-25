@@ -28,7 +28,9 @@ def static_check(html: str) -> dict[str, Any]:
         issues.append("script 标签数量不匹配")
     if "```" in s:
         issues.append("残留 Markdown 代码围栏")
-    if re.search(r"\bTODO\b|lorem ipsum|占位符文本", s, flags=re.I):
+    # Only flag real placeholder markers. Do NOT case-fold: generated kanban apps legitimately
+    # use lowercase "todo" as a task status value, which previously caused false rejects.
+    if re.search(r"\bTODO\b|lorem ipsum|占位符文本", s):
         issues.append("存在占位符/TODO 文本")
 
     bad_open = len(re.findall(r"<div\b", low)) - len(re.findall(r"</div>", low))
