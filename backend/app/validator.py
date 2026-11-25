@@ -35,4 +35,13 @@ def static_check(html: str) -> dict[str, Any]:
     if bad_open > 3:
         issues.append(f"div 标签明显不闭合（差 {bad_open} 个）")
 
+    # Decorative controls: elements with pointer cursor / nav-item class but no click binding anywhere.
+    has_any_click = bool(re.search(r"onclick|addEventListener|\.onclick|querySelectorAll", s))
+    nav_items = re.findall(r'class="[^"]*(?:nav-item|nav_link|side-item|menu-item)[^"]*"', s)
+    if nav_items and not has_any_click:
+        issues.append(f"存在 {len(nav_items)} 个导航项但没有任何点击绑定（死菜单）")
+    pointer_divs = len(re.findall(r'<div[^>]*class="[^"]*"[^>]*style="[^"]*cursor\s*:\s*pointer', s))
+    if pointer_divs >= 3 and not has_any_click:
+        issues.append(f"存在 {pointer_divs} 个可点击样式的 div 但没有点击绑定")
+
     return {"valid": len(issues) == 0, "issues": issues, "score": max(0, 100 - len(issues) * 12)}

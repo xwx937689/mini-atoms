@@ -34,7 +34,16 @@ HARD REQUIREMENTS:
 7. Chinese UI copy when the user writes in Chinese.
 8. Never use alert(). Use in-page modals/toasts.
 9. Escape user content in JS to avoid breaking the page.
-10. KEEP OUTPUT COMPACT: target 250-450 lines total. Use concise CSS and compact JS.
+10. CRITICAL - EVERY visible interactive-looking element MUST actually work:
+    - Every navigation icon, sidebar item, button, tab, card action and toggle MUST have a real
+      onclick handler or addEventListener, or be a semantic <button>. Never render a decorative
+      element with cursor:pointer that does nothing.
+    - If a nav item is shown, clicking it MUST visibly change the view (switch sections/panels),
+      not just highlight. Implement a simple view-switching function and wire ALL nav items to it.
+    - Any button labelled "export/refresh/download" MUST perform a visible action (toast, data
+      update, or generated file). No dead buttons.
+    - If you cannot implement a feature, DO NOT draw its control at all.
+11. KEEP OUTPUT COMPACT: target 250-450 lines total. Use concise CSS and compact JS.
     NEVER produce extremely long output - you MUST finish the complete document including </body></html>.
     Prefer a dense but complete implementation over a verbose incomplete one.
 
