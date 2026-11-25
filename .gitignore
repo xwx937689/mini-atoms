@@ -10,3 +10,4 @@ dist/
 .npmcache/
 *.png
 screenshot-*.png
+.idea/
