@@ -197,8 +197,10 @@ export default function App() {
       await Promise.all([refreshProjects(), api.getProject(current.id).then(p => {
         setVersions(p.versions || [])
         setCurrent(p)
-        const newMsgs = [...messages.filter(m => m.id !== tempId), detail]
-        mirrorDetail(p, newMsgs, p.versions || [], res.html)
+        setMessages(p.messages || [])
+        // Use server's authoritative messages - rebuilding from a stale closure
+        // previously dropped the user's prompt message from the local mirror.
+        mirrorDetail(p, p.messages || [], p.versions || [], res.html)
       })])
     } catch (e: any) {
       setError(e.message || '生成失败')
@@ -229,12 +231,8 @@ export default function App() {
       await Promise.all([refreshProjects(), api.getProject(current.id).then(p => {
         setVersions(p.versions || [])
         setCurrent(p)
-        const msgs = [
-          ...messages,
-          { role: 'user' as const, agent: '', kind: 'edit', content: instruction },
-          resultMsg,
-        ]
-        mirrorDetail(p, msgs, p.versions || [], res.html)
+        setMessages(p.messages || [])
+        mirrorDetail(p, p.messages || [], p.versions || [], res.html)
       })])
     } catch (e: any) {
       setError(e.message || '修改失败')
@@ -262,26 +260,31 @@ export default function App() {
 
   async function doRollback(v: number) {
     if (!current) return
-    const res = await api.rollback(current.id, v)
-    setPreviewHtml(res.html)
-    setShowVersions(false)
-    await api.getProject(current.id).then(p => {
-      setMessages(p.messages || [])
-      setCurrent(p)
-      mirrorDetail(p, p.messages || [], p.versions || [], res.html)
-    })
+    setError('')
+    try {
+      const res = await api.rollback(current.id, v)
+      setPreviewHtml(res.html)
+      setShowVersions(false)
+      await api.getProject(current.id).then(p => {
+        setMessages(p.messages || [])
+        setCurrent(p)
+        mirrorDetail(p, p.messages || [], p.versions || [], res.html)
+      })
+    } catch (e: any) {
+      setError(`回滚失败：${e.message || '未知错误'}`)
+    }
   }
 
   async function doPublish() {
     if (!current) return
+    setError('')
     setStatus('正在发布...')
     try {
       const res = await api.publish(current.id, current.name)
       setPublishUrl(`${location.origin}${res.url}`)
-      setMessages(m => [...m, { role: 'agent', agent: 'System', kind: 'result', content: `已发布：${res.url}` }])
       await api.getProject(current.id).then(p => { setMessages(p.messages || []); setCurrent(p) })
     } catch (e: any) {
-      setError(e.message)
+      setError(`发布失败：${e.message || '未知错误'}`)
     } finally {
       setStatus('')
     }

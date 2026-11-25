@@ -66,15 +66,20 @@ def clean_html(text: str) -> str:
             s = s[i:]
             low = s.lower()
 
-    # Repair truncated output: append missing closing tags.
+    # Repair truncated output. Close INNER tags first (script/style), then outer ones,
+    # otherwise "</script>" ends up after "</html>" and the document breaks.
+    low = s.lower()
+    if low.count("<style") > low.count("</style>"):
+        s += "\n</style>"
+    if low.count("<script") > low.count("</script>"):
+        s += "\n</script>"
+    low = s.lower()
+    if "<head" in low and "</head>" not in low:
+        s += "\n</head>"
     if "<body" in low and "</body>" not in low:
         s += "\n</body>"
     if "<html" in low and "</html>" not in low:
         s += "\n</html>"
-    if s.lower().count("<script") > s.lower().count("</script>"):
-        s += "\n</script>"
-    if s.lower().count("<style") > s.lower().count("</style>"):
-        s += "\n</style>"
     return s.strip()
 
 

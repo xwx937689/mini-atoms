@@ -29,8 +29,8 @@ db.init_db()
 # ---------------- schemas ----------------
 
 class CreateProjectIn(BaseModel):
-    name: str = "未命名应用"
-    prompt: str = ""
+    name: str = Field(default="未命名应用", max_length=80)
+    prompt: str = Field(default="", max_length=8000)
 
 
 class GenerateIn(BaseModel):
@@ -54,7 +54,7 @@ class PublishIn(BaseModel):
 
 
 class RenameIn(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=80)
 
 
 # ---------------- helpers ----------------
@@ -178,6 +178,24 @@ async def generate(body: GenerateIn):
             "mock_mode": not llm.ready,
         }
     except Exception as e:
+        # Only fall back when the LLM transport itself failed (dead key / quota / network).
+        # NEVER replace a successfully generated-but-imperfect result with generic mock data.
+        if llm.ready and isinstance(e, LLMError) and "模型请求失败" in str(e):
+            try:
+                plan = plan if 'plan' in locals() else mock.plan(prompt)
+                html = mock.build(prompt, plan)
+                version_no = db.next_version_no(body.project_id)
+                name = plan.get("app_name") or p["name"]
+                db.update_project_html(body.project_id, html, prompt=prompt, name=name)
+                db.add_version(body.project_id, version_no, f"V{version_no}: {name}", html, plan)
+                db.add_message(body.project_id, "agent", "模型服务不可用，已切换到演示模式生成。", agent="System", kind="result", extra={"version_no": version_no})
+                return {
+                    "ok": True, "project_id": body.project_id, "version_no": version_no,
+                    "plan": plan, "html": html, "steps": steps, "mock_mode": True,
+                    "fallback": True, "fallback_reason": str(e)[:200],
+                }
+            except Exception as mock_err:
+                e = Exception(f"{e}；演示模式也失败：{mock_err}")
         db.add_message(body.project_id, "agent", f"生成失败：{e}", agent="System", kind="error")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e), "steps": steps})
 
@@ -213,6 +231,19 @@ async def edit_app(body: EditIn):
         db.add_message(body.project_id, "agent", "修改已完成并生成新版本。", agent="Alex · Engineer", kind="result", extra={"steps": steps, "version_no": version_no})
         return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "mock_mode": not llm.ready}
     except Exception as e:
+        # Only fall back on transport failure. A validation failure after a successful model
+        # call must NOT wipe the previous good version with generic mock output.
+        if llm.ready and isinstance(e, LLMError) and "模型请求失败" in str(e):
+            try:
+                html = mock.edit(p["original_prompt"], p["current_html"], history, instruction)
+                if static_check(html)["valid"]:
+                    version_no = db.next_version_no(body.project_id)
+                    db.update_project_html(body.project_id, html)
+                    db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
+                    db.add_message(body.project_id, "agent", "模型服务不可用，已用演示模式应用修改。", agent="System", kind="result", extra={"version_no": version_no})
+                    return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "mock_mode": True, "fallback": True}
+            except Exception as mock_err:
+                e = Exception(f"{e}；演示模式也失败：{mock_err}")
         db.add_message(body.project_id, "agent", f"修改失败，已保留上一可用版本：{e}", agent="System", kind="error")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e), "steps": steps})
 
@@ -284,8 +315,9 @@ async def index():
 async def spa_fallback(full_path: str):
     if full_path.startswith("api/") or full_path.startswith("p/"):
         raise HTTPException(404, "Not found")
-    candidate = FRONTEND_DIST / full_path
-    if candidate.is_file():
+    candidate = (FRONTEND_DIST / full_path).resolve()
+    # Never serve files outside the built frontend directory.
+    if candidate.is_file() and str(candidate).startswith(str(FRONTEND_DIST.resolve())):
         from fastapi.responses import FileResponse
         return FileResponse(candidate)
     index_file = FRONTEND_DIST / "index.html"
