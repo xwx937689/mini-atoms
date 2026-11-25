@@ -1,8 +1,12 @@
 .env
-data/*.db
-data/*.db-wal
-data/*.db-shm
+**/*.db
+**/*.db-wal
+**/*.db-shm
 __pycache__/
 *.pyc
 node_modules/
 dist/
+*.tsbuildinfo
+.npmcache/
+*.png
+screenshot-*.png
