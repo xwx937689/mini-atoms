@@ -3,3 +3,7 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.4
 python-dotenv==1.0.1
+
+# Optional: headless browser smoke check (local only; Render free tier can't run Chromium).
+# Install with: pip install playwright && python -m playwright install chromium
+# playwright==1.49.1

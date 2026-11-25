@@ -5,12 +5,12 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from . import config, database as db, mock
+from . import browser_check, config, database as db, mock, ratelimit
 from .llm import LLMClient, LLMError
 from .validator import static_check
 from .scoring import score_app
@@ -18,7 +18,7 @@ from .scoring import score_app
 app = FastAPI(title="Mini Atoms API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.CORS_ORIGINS + ["*"],
+    allow_origins=["*"] if config.CORS_ALLOW_ALL else config.CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,6 +69,84 @@ def _ok(project_id: str) -> dict:
     if not p:
         raise HTTPException(404, "项目不存在")
     return p
+
+
+async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) -> tuple[str, dict]:
+    """Unified quality gate for BOTH generate and edit.
+
+    Order: static structure check -> model review -> (one) repair -> re-check.
+    Never converts a review failure into a pass. When the reviewer itself errors,
+    the result is marked REVIEW_ERROR but a structurally-valid page is still
+    accepted (with an explicit unverified flag) so the demo does not hard-fail
+    just because the reviewer model timed out.
+
+    Returns (final_html, gate_report) or raises LLMError when unrecoverable.
+    """
+    static = static_check(html)
+    review_report: dict = {"status": "skipped", "valid": True, "issues": [], "score": None}
+
+    if llm.ready:
+        review_report = await llm.review(html)
+        if review_report["status"] == "ok":
+            steps.append(_activity("Reviewer", "模型审查完成" if review_report["valid"] else "模型审查发现问题",
+                                   "Review", "；".join(review_report["issues"][:3]) or f"评分 {review_report['score']:.0f}"))
+        else:
+            steps.append(_activity("Reviewer", "模型审查异常，改为仅依赖结构校验", "Review",
+                                   f"REVIEW_ERROR: {review_report.get('error', '')}"))
+
+    needs_repair = (not static["valid"]) or (review_report["status"] == "ok" and not review_report["valid"])
+    if needs_repair and allow_repair:
+        issues = list(static["issues"]) + list(review_report.get("issues") or [])
+        steps.append(_activity("Reviewer", "发现质量问题，请求修复", "Repair", "；".join(issues[:3])))
+        if llm.ready:
+            html = await llm.repair(html, issues)
+        static = static_check(html)
+        if llm.ready:
+            review_report = await llm.review(html)
+            if review_report["status"] == "ok":
+                steps.append(_activity("Reviewer", "修复后复审" + ("通过" if review_report["valid"] else "仍未通过"),
+                                       "Review", "；".join(review_report["issues"][:3]) or "无问题"))
+
+    static = static_check(html)
+    if not static["valid"]:
+        raise LLMError("结构校验未通过：" + "；".join(static["issues"][:3]))
+    if review_report["status"] == "ok" and not review_report["valid"]:
+        raise LLMError("模型审查未通过：" + "；".join(review_report["issues"][:3]))
+
+    # Optional headless-browser smoke test: catches white screens / runtime errors
+    # that no regex can. Skipped cleanly when Chromium is unavailable (e.g. free tier).
+    browser = {"status": "skipped", "reason": "未启用"}
+    if browser_check.ENABLED != "false":
+        browser = await browser_check.check_app(html)
+        if browser["status"] == "ok":
+            ok = browser.get("passed", False)
+            steps.append(_activity("Reviewer", "浏览器运行验证" + ("通过" if ok else "发现问题"),
+                                   "Run browser", f"元素 {browser.get('element_count', 0)} · "
+                                                  f"交互控件 {browser.get('interactive_count', 0)} · "
+                                                  f"JS错误 {len(browser.get('js_errors') or [])}"))
+            if not ok and allow_repair:
+                issues = ["浏览器运行验证未通过"]
+                if browser.get("js_errors"):
+                    issues.append("JS 运行时错误：" + "；".join(browser["js_errors"][:2]))
+                if not browser["checks"].get("has_content"):
+                    issues.append("页面正文内容过少，疑似白屏")
+                steps.append(_activity("Reviewer", "按运行结果请求修复", "Repair", "；".join(issues[:3])))
+                if llm.ready:
+                    html = await llm.repair(html, issues)
+                    static = static_check(html)
+                    if static["valid"]:
+                        browser = await browser_check.check_app(html)
+        else:
+            steps.append(_activity("Reviewer", "浏览器验证不可用，已跳过", "Run browser", browser.get("reason", "")))
+
+    steps.append(_activity("Reviewer", "质量校验通过", "Run check", "HTML 结构完整"))
+    return html, {
+        "verified": review_report["status"] == "ok",
+        "review_status": review_report["status"],
+        "review_score": review_report.get("score"),
+        "static_issues": static["issues"],
+        "browser": browser,
+    }
 
 
 # ---------------- system ----------------
@@ -126,7 +204,12 @@ async def remove_project(project_id: str):
 # ---------------- generation ----------------
 
 @app.post("/api/generate")
-async def generate(body: GenerateIn):
+async def generate(body: GenerateIn, request: Request):
+    allowed, retry = ratelimit.check("generate", ratelimit.client_ip(request), config.RL_GENERATE, config.RL_WINDOW)
+    if not allowed:
+        return JSONResponse(status_code=429, content={
+            "ok": False, "error": f"请求过于频繁，请 {retry} 秒后再试（每 {config.RL_WINDOW // 60} 分钟最多 {config.RL_GENERATE} 次）"
+        })
     p = _ok(body.project_id)
     prompt = body.prompt.strip()
     if not prompt:
@@ -149,21 +232,8 @@ async def generate(body: GenerateIn):
         steps.append(_activity("Alex", "正在生成完整 HTML 应用", "Write code", f"规划 {len(plan.get('features', []))} 项交互功能"))
         html = await llm.build(prompt, plan) if llm.ready else mock.build(prompt, plan)
 
-        # quality gate + one repair
-        if llm.ready:
-            report = await llm.review(html)
-        else:
-            await asyncio.sleep(0.1)
-            report = mock.review(html)
-        if not report.get("valid", True) or not static_check(html)["valid"]:
-            issues = list(report.get("issues") or []) + static_check(html)["issues"]
-            steps.append(_activity("Reviewer", "发现质量问题，请求修复", "Review", "；".join(issues[:3])))
-            if llm.ready:
-                html = await llm.repair(html, issues)
-            if not static_check(html)["valid"]:
-                raise LLMError("自动修复后仍未通过结构校验：" + "；".join(static_check(html)["issues"][:3]))
-
-        steps.append(_activity("Reviewer", "质量校验通过", "Run check", "HTML 结构完整，脚本可运行"))
+        # unified quality gate: static check -> model review -> one repair -> re-check
+        html, gate = await quality_gate(html, steps, allow_repair=llm.ready)
 
         quality = score_app(html, plan)
 
@@ -183,6 +253,7 @@ async def generate(body: GenerateIn):
             "html": html,
             "steps": steps,
             "quality": quality,
+            "gate": gate,
             "mock_mode": not llm.ready,
         }
     except Exception as e:
@@ -209,7 +280,12 @@ async def generate(body: GenerateIn):
 
 
 @app.post("/api/edit")
-async def edit_app(body: EditIn):
+async def edit_app(body: EditIn, request: Request):
+    allowed, retry = ratelimit.check("edit", ratelimit.client_ip(request), config.RL_GENERATE, config.RL_WINDOW)
+    if not allowed:
+        return JSONResponse(status_code=429, content={
+            "ok": False, "error": f"请求过于频繁，请 {retry} 秒后再试（每 {config.RL_WINDOW // 60} 分钟最多 {config.RL_GENERATE} 次）"
+        })
     p = _ok(body.project_id)
     instruction = body.instruction.strip()
     if not instruction:
@@ -224,14 +300,19 @@ async def edit_app(body: EditIn):
     try:
         steps.append(_activity("Alex", "在现有版本上应用修改", "Edit code", "保留已有功能"))
         html = await llm.edit(p["original_prompt"], p["current_html"], history, instruction) if llm.ready else mock.edit(p["original_prompt"], p["current_html"], history, instruction)
-        check = static_check(html)
-        if not check["valid"]:
-            if llm.ready:
-                html = await llm.repair(html, check["issues"])
-                check = static_check(html)
-            if not check["valid"]:
-                raise LLMError("修改结果校验失败：" + "；".join(check["issues"][:3]))
-        steps.append(_activity("Reviewer", "修改后校验通过，保留全部既有功能", "Run check", f"HTML {len(html)} 字符"))
+
+        # Same unified gate as generate. On failure we raise BEFORE touching the DB,
+        # so the previous good version is preserved.
+        html, gate = await quality_gate(html, steps, allow_repair=llm.ready)
+
+        # Regression guard: a "successful" edit that returns a drastically smaller
+        # document has almost certainly dropped prior features. Reject it instead of
+        # silently replacing a working version with a hollow shell.
+        prev_len = len(p["current_html"] or "")
+        if prev_len >= 1500 and len(html) < prev_len * 0.65:
+            raise LLMError(
+                f"修改后内容明显缩水（{prev_len} → {len(html)} 字符），疑似丢失既有功能，已保留上一可用版本"
+            )
 
         quality = score_app(html, None)
 
@@ -239,7 +320,7 @@ async def edit_app(body: EditIn):
         db.update_project_html(body.project_id, html)
         db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
         db.add_message(body.project_id, "agent", "修改已完成并生成新版本。", agent="Alex · Engineer", kind="result", extra={"steps": steps, "version_no": version_no})
-        return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "quality": quality, "mock_mode": not llm.ready}
+        return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "quality": quality, "gate": gate, "mock_mode": not llm.ready}
     except Exception as e:
         # Only fall back on transport failure. A validation failure after a successful model
         # call must NOT wipe the previous good version with generic mock output.
@@ -289,7 +370,10 @@ async def version_html(version_id: int):
 # ---------------- publish ----------------
 
 @app.post("/api/publish")
-async def publish(body: PublishIn):
+async def publish(body: PublishIn, request: Request):
+    allowed, retry = ratelimit.check("publish", ratelimit.client_ip(request), config.RL_GENERATE * 3, config.RL_WINDOW)
+    if not allowed:
+        return JSONResponse(status_code=429, content={"ok": False, "error": f"发布过于频繁，请 {retry} 秒后再试"})
     p = _ok(body.project_id)
     if not p["current_html"]:
         raise HTTPException(400, "尚无应用可发布")
@@ -300,12 +384,65 @@ async def publish(body: PublishIn):
     return {"ok": True, "slug": slug, "url": f"/p/{slug}"}
 
 
+PUBLISH_WRAPPER = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ · Mini Atoms 发布页</title>
+<style>
+html,body{margin:0;height:100%;background:#f5f6f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif}
+.bar{height:38px;display:flex;align-items:center;gap:10px;padding:0 14px;background:#fff;border-bottom:1px solid #e5e7eb;font-size:12px;color:#6b7280}
+.bar b{color:#111827;font-weight:600}.bar .tag{margin-left:auto;background:#eef2ff;color:#4f46e5;padding:3px 9px;border-radius:999px;font-size:11px}
+.bar a{color:#4f46e5;text-decoration:none}
+iframe{display:block;width:100%;height:calc(100% - 38px);border:0;background:#fff}
+</style></head><body>
+<div class="bar"><b>__TITLE__</b><span>由 Mini Atoms 生成</span>
+<span class="tag">用户生成内容 · 与本平台无隶属或背书关系</span>
+<a href="/" target="_blank" rel="noopener">用 Mini Atoms 构建 →</a></div>
+<iframe src="/p/__SLUG__/raw" sandbox="allow-scripts allow-forms allow-modals" referrerpolicy="no-referrer" title="published app"></iframe>
+</body></html>"""
+
+# Strict CSP for user-generated content: inline style/script allowed (single-file apps need them),
+# but NO external network, NO framing by others, NO base-uri hijack.
+PUBLISH_CSP = (
+    "default-src 'none'; "
+    "style-src 'unsafe-inline'; "
+    "script-src 'unsafe-inline'; "
+    "img-src data: blob:; "
+    "font-src data:; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'self'"
+)
+
+
 @app.get("/p/{slug}", response_class=HTMLResponse)
 async def published_page(slug: str):
+    """Serve a safe wrapper shell. The generated HTML never runs on this origin directly."""
     page = db.get_published(slug)
     if not page:
         return HTMLResponse("<h1>404 - 页面不存在</h1>", status_code=404)
-    return HTMLResponse(page["html"])
+    title = (page["title"] or "Mini Atoms App").replace("<", "&lt;").replace(">", "&gt;")[:80]
+    html = PUBLISH_WRAPPER.replace("__TITLE__", title).replace("__SLUG__", slug)
+    return HTMLResponse(html, headers={
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; base-uri 'none'",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    })
+
+
+@app.get("/p/{slug}/raw", response_class=HTMLResponse)
+async def published_raw(slug: str):
+    """The actual generated document, locked down by CSP and sandboxed by the wrapper iframe."""
+    page = db.get_published(slug)
+    if not page:
+        return HTMLResponse("<h1>404</h1>", status_code=404)
+    return HTMLResponse(page["html"], headers={
+        "Content-Security-Policy": PUBLISH_CSP,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex",
+    })
 
 
 # ---------------- static frontend (production) ----------------

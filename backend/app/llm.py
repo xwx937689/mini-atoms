@@ -110,7 +110,7 @@ class LLMClient:
             "stream": False,
             "effort": "low",
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=15.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=15.0)) as client:
             r = await client.post(f"{self.base}/chat/completions", headers=self._headers(), json=payload)
             if r.status_code >= 400:
                 raise LLMError(f"模型请求失败 {r.status_code}: {r.text[:300]}")
@@ -154,6 +154,12 @@ class LLMClient:
         return clean_html(await self.complete(prompts.SYSTEM_EDITOR, user, temperature=0.5, max_tokens=32000))
 
     async def review(self, html: str) -> dict:
+        """Model review. Never silently converts failure into pass.
+
+        Returns {"status": "ok"|"error", "valid", "issues", "score", "error"}.
+        When status == "error" the caller must treat the result as UNVERIFIED,
+        not as approved.
+        """
         try:
             result = await self.complete(
                 prompts.SYSTEM_REVIEWER,
@@ -162,11 +168,22 @@ class LLMClient:
                 max_tokens=800,
             )
             d = _extract_json(result)
-            if isinstance(d, dict):
-                return d
-        except Exception:
-            pass
-        return {"valid": True, "issues": [], "score": 85}
+            if not isinstance(d, dict):
+                return {"status": "error", "valid": False, "issues": [], "score": 0,
+                        "error": "审查返回不是 JSON 对象"}
+            if not isinstance(d.get("valid"), bool):
+                return {"status": "error", "valid": False, "issues": [], "score": 0,
+                        "error": "审查结果缺少合法 valid 字段"}
+            issues = d.get("issues")
+            if not isinstance(issues, list):
+                issues = []
+            try:
+                score = float(d.get("score", 0))
+            except (TypeError, ValueError):
+                score = 0.0
+            return {"status": "ok", "valid": bool(d["valid"]), "issues": [str(i) for i in issues], "score": score}
+        except Exception as e:
+            return {"status": "error", "valid": False, "issues": [], "score": 0, "error": str(e)[:200]}
 
     async def repair(self, html: str, issues: list[str]) -> str:
         user = f"问题清单：\n{json.dumps(issues, ensure_ascii=False)}\n\n有问题的 HTML：\n{html}"
