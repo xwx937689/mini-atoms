@@ -43,7 +43,10 @@ HARD REQUIREMENTS:
     - Any button labelled "export/refresh/download" MUST perform a visible action (toast, data
       update, or generated file). No dead buttons.
     - If you cannot implement a feature, DO NOT draw its control at all.
-11. KEEP OUTPUT COMPACT: target 250-450 lines total. Use concise CSS and compact JS.
+11. Keep all state in in-memory JS variables. Do NOT use localStorage, sessionStorage,
+    indexedDB, cookies or any browser storage API - the app runs in a sandboxed iframe where
+    these APIs throw SecurityError and will crash your entire script. Seed data on load instead.
+12. KEEP OUTPUT COMPACT: target 250-450 lines total. Use concise CSS and compact JS.
     NEVER produce extremely long output - you MUST finish the complete document including </body></html>.
     Prefer a dense but complete implementation over a verbose incomplete one.
 

@@ -52,6 +52,34 @@ export interface Version {
   html_len: number
 }
 
+/**
+ * Inject a memory-backed storage shim so generated apps that call localStorage
+ * do not crash inside our sandboxed iframe (sandbox has no allow-same-origin).
+ * The shim lives only in the preview document; it cannot touch the host app's data.
+ */
+export function preparePreview(html: string): string {
+  const shim = '<scr' + 'ipt>(function(){' +
+    'var m={};function ls(){return{' +
+    'getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},' +
+    'setItem:function(k,v){m[k]=String(v);},' +
+    'removeItem:function(k){delete m[k];},' +
+    'clear:function(){m={};},' +
+    'key:function(i){var ks=Object.keys(m);return i<ks.length?ks[i]:null;},' +
+    'get length(){return Object.keys(m).length;}' +
+    '};}' +
+    'try{if(!window.localStorage)throw 0;}catch(e){' +
+    'try{Object.defineProperty(window,"localStorage",{value:ls(),configurable:true});}' +
+    'catch(e2){window.localStorage=ls();}}' +
+    'try{if(!window.sessionStorage)throw 0;}catch(e){' +
+    'try{Object.defineProperty(window,"sessionStorage",{value:ls(),configurable:true});}' +
+    'catch(e2){window.sessionStorage=ls();}}' +
+    '})();</scr' + 'ipt>';
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/(<head[^>]*>)/i, '$1' + shim);
+  }
+  return shim + html;
+}
+
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...options,

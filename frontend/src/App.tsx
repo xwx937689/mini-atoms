@@ -5,7 +5,7 @@ import {
   Loader2, Sparkles, Layers, CheckCircle2, Circle, AlertCircle, X, Globe2,
   Bot, User, Zap, GitBranch, Clock, MoreHorizontal, Pencil, RefreshCw,
 } from 'lucide-react'
-import { api, type Project, type Message, type Plan, type Activity, type Version } from './api'
+import { api, preparePreview, type Project, type Message, type Plan, type Activity, type Version } from './api'
 import { loadSnapshot, saveDetail, upsertProject, saveSnapshot } from './storage'
 
 const AGENT_META: Record<string, { color: string; bg: string; short: string }> = {
@@ -571,7 +571,7 @@ export default function App() {
                 </div>
                 <iframe
                   key={previewHtml.length}
-                  srcDoc={previewHtml}
+                  srcDoc={preparePreview(previewHtml)}
                   sandbox="allow-scripts allow-forms allow-modals"
                   title="Generated app preview"
                   className="flex-1 w-full border-0"
