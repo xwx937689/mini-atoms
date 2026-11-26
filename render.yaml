@@ -16,3 +16,18 @@ services:
         value: deepseek-chat
       - key: LLM_API_KEY
         sync: false
+      # Free tier cannot run Chromium (512MB). Keep browser check off online;
+      # it reports "skipped" rather than pretending to pass.
+      - key: BROWSER_CHECK
+        value: "false"
+      # Render terminates TLS at its edge and appends X-Forwarded-For.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: RL_GENERATE
+        value: "6"
+      - key: RL_WINDOW
+        value: "600"
+      - key: LLM_TIMEOUT
+        value: "180"
+      - key: CORS_ALLOW_ALL
+        value: "false"
