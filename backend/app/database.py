@@ -112,6 +112,32 @@ def get_project(project_id: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def ensure_project(project_id: str, name: str = "未命名应用", html: str = "", prompt: str = "") -> bool:
+    """Recreate a project row that disappeared (free-tier restart wipes the DB).
+
+    The client keeps a mirror of every project, so when it acts on a project the
+    server no longer knows about, we can rebuild the row from the HTML it sends.
+    Never overwrites an existing row; only fills an empty current_html.
+
+    Returns True if the project had to be recreated.
+    """
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute("SELECT id, current_html FROM projects WHERE id=?", (project_id,)).fetchone()
+        if row:
+            if html and not (row["current_html"] or ""):
+                conn.execute(
+                    "UPDATE projects SET current_html=?, updated_at=? WHERE id=?",
+                    (html, now, project_id),
+                )
+            return False
+        conn.execute(
+            "INSERT INTO projects(id,name,original_prompt,current_html,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (project_id, name, prompt, html, now, now),
+        )
+    return True
+
+
 def list_projects() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(

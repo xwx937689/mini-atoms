@@ -58,16 +58,27 @@ def test_project_name_too_long(client):
 
 def test_rate_limit_returns_429(client, monkeypatch):
     """Schema-invalid requests are rejected (422) before the limiter and consume no quota.
-    Use schema-valid requests against a missing project (404) to exercise the limiter."""
+
+    Use /api/edit with no HTML: the limiter runs first, then it 400s on the missing
+    document — cheap, no model call, but still consumes a quota slot.
+    """
     monkeypatch.setattr(M.config, "RL_GENERATE", 2)
     codes = [
-        client.post("/api/generate", json={"project_id": "missing", "prompt": "生成一个页面"}).status_code
+        client.post("/api/edit", json={"project_id": "rlprobe", "instruction": "改个标题"}).status_code
         for _ in range(4)
     ]
-    assert codes[:2] == [404, 404], codes
+    assert codes[:2] == [400, 400], codes
     assert codes[2] == 429 and codes[3] == 429, codes
 
 
-def test_unknown_project_404(client):
-    r = client.post("/api/generate", json={"project_id": "nope", "prompt": "x"})
-    assert r.status_code == 404
+def test_missing_project_is_healed_not_404(client):
+    """Acting on a project the server lost must self-heal, never 404.
+
+    With no HTML supplied there is nothing to rebuild from, so it degrades to 400
+    (a clear business error) rather than a confusing 404.
+    """
+    r = client.post("/api/edit", json={"project_id": "nope", "instruction": "x"})
+    assert r.status_code == 400
+
+    r2 = client.get("/api/projects/nope/versions")
+    assert r2.status_code == 200 and r2.json() == []

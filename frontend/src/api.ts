@@ -121,17 +121,17 @@ export const api = {
     req<{ ok: boolean; version_no: number; plan: Plan; html: string; steps: Activity[]; quality?: Quality; mock_mode: boolean; fallback?: boolean }>(
       '/api/generate', { method: 'POST', body: JSON.stringify({ project_id, prompt }) }
     ),
-  edit: (project_id: string, instruction: string) =>
+  edit: (project_id: string, instruction: string, current_html?: string) =>
     req<{ ok: boolean; version_no: number; html: string; steps: Activity[]; quality?: Quality }>(
-      '/api/edit', { method: 'POST', body: JSON.stringify({ project_id, instruction }) }
+      '/api/edit', { method: 'POST', body: JSON.stringify({ project_id, instruction, current_html }) }
     ),
   versions: (project_id: string) => req<Version[]>(`/api/projects/${project_id}/versions`),
   rollback: (project_id: string, version_no: number) =>
     req<{ ok: boolean; html: string; version_no: number }>(
       '/api/rollback', { method: 'POST', body: JSON.stringify({ project_id, version_no }) }
     ),
-  publish: (project_id: string, title?: string) =>
+  publish: (project_id: string, title?: string, html?: string) =>
     req<{ ok: boolean; slug: string; url: string }>(
-      '/api/publish', { method: 'POST', body: JSON.stringify({ project_id, title }) }
+      '/api/publish', { method: 'POST', body: JSON.stringify({ project_id, title, html }) }
     ),
 }

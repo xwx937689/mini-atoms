@@ -42,6 +42,9 @@ class GenerateIn(BaseModel):
 class EditIn(BaseModel):
     project_id: str = Field(..., max_length=64)
     instruction: str = Field(..., min_length=1, max_length=4000)
+    # Client-side mirror of the current document. Used only when the server lost the
+    # project (free-tier restart) so editing still works instead of returning 404.
+    current_html: Optional[str] = Field(default=None, max_length=2_000_000)
 
 
 class RollbackIn(BaseModel):
@@ -52,6 +55,8 @@ class RollbackIn(BaseModel):
 class PublishIn(BaseModel):
     project_id: str = Field(..., max_length=64)
     title: Optional[str] = Field(default=None, max_length=80)
+    # Same rescue path as EditIn: lets publishing survive a wiped server DB.
+    html: Optional[str] = Field(default=None, max_length=2_000_000)
 
 
 class RenameIn(BaseModel):
@@ -229,10 +234,15 @@ async def generate(body: GenerateIn, request: Request):
         return JSONResponse(status_code=429, content={
             "ok": False, "error": f"请求过于频繁，请 {retry} 秒后再试（每 {config.RL_WINDOW // 60} 分钟最多 {config.RL_GENERATE} 次）"
         })
-    p = _ok(body.project_id)
     prompt = body.prompt.strip()
     if not prompt:
         raise HTTPException(400, "需求不能为空")
+
+    # Self-heal: the client may still show a project whose server row was lost on restart.
+    p = db.get_project(body.project_id)
+    if not p:
+        db.ensure_project(body.project_id, "未命名应用", "", prompt)
+        p = db.get_project(body.project_id)
 
     steps: list[dict] = []
 
@@ -309,12 +319,20 @@ async def edit_app(body: EditIn, request: Request):
         return JSONResponse(status_code=429, content={
             "ok": False, "error": f"请求过于频繁，请 {retry} 秒后再试（每 {config.RL_WINDOW // 60} 分钟最多 {config.RL_GENERATE} 次）"
         })
-    p = _ok(body.project_id)
     instruction = body.instruction.strip()
     if not instruction:
         raise HTTPException(400, "修改要求不能为空")
-    if not p["current_html"]:
+
+    # Self-heal: the server may have restarted and lost this project while the client
+    # still holds a mirror of it. Rebuild from the HTML the client sends, so editing
+    # keeps working instead of failing with "project not found".
+    p = db.get_project(body.project_id)
+    base_html = (p["current_html"] if p else "") or (body.current_html or "")
+    if not base_html:
         raise HTTPException(400, "请先生成应用")
+    if not p or not (p["current_html"] or ""):
+        db.ensure_project(body.project_id, "未命名应用", base_html)
+        p = db.get_project(body.project_id)
 
     db.add_message(body.project_id, "user", instruction, kind="edit")
     history = db.get_messages(body.project_id)
@@ -322,7 +340,7 @@ async def edit_app(body: EditIn, request: Request):
 
     try:
         steps.append(_activity("Alex", "在现有版本上应用修改", "Edit code", "保留已有功能"))
-        html = await llm.edit(p["original_prompt"], p["current_html"], history, instruction) if llm.ready else mock.edit(p["original_prompt"], p["current_html"], history, instruction)
+        html = await llm.edit(p["original_prompt"], base_html, history, instruction) if llm.ready else mock.edit(p["original_prompt"], base_html, history, instruction)
 
         # Same unified gate as generate. On failure we raise BEFORE touching the DB,
         # so the previous good version is preserved.
@@ -331,7 +349,7 @@ async def edit_app(body: EditIn, request: Request):
         # Regression guard: a "successful" edit that returns a drastically smaller
         # document has almost certainly dropped prior features. Reject it instead of
         # silently replacing a working version with a hollow shell.
-        prev_len = len(p["current_html"] or "")
+        prev_len = len(base_html)
         if prev_len >= 1500 and len(html) < prev_len * 0.65:
             raise LLMError(
                 f"修改后内容明显缩水（{prev_len} → {len(html)} 字符），疑似丢失既有功能，已保留上一可用版本"
@@ -370,13 +388,15 @@ async def edit_app(body: EditIn, request: Request):
 
 @app.get("/api/projects/{project_id}/versions")
 async def versions(project_id: str):
-    _ok(project_id)
+    # Empty list (not 404) when the server lost the row: the client still renders fine.
     return db.list_versions(project_id)
 
 
 @app.post("/api/rollback")
 async def rollback(body: RollbackIn):
-    p = _ok(body.project_id)
+    p = db.get_project(body.project_id)
+    if not p:
+        raise HTTPException(409, "服务端数据已重置（免费实例重启），历史版本不可用。当前页面仍可继续修改或发布。")
     v = db.get_version(body.project_id, body.version_no)
     if not v:
         raise HTTPException(404, "版本不存在")
@@ -401,12 +421,21 @@ async def publish(body: PublishIn, request: Request):
     allowed, retry = ratelimit.check("publish", ratelimit.client_ip(request), config.RL_GENERATE * 3, config.RL_WINDOW)
     if not allowed:
         return JSONResponse(status_code=429, content={"ok": False, "error": f"发布过于频繁，请 {retry} 秒后再试"})
-    p = _ok(body.project_id)
-    if not p["current_html"]:
+    # Publishing must not depend on the server still holding this project: the free
+    # tier wipes SQLite on restart while the client keeps a mirror. Accept the HTML
+    # from the client as a fallback and rebuild the row (self-heal).
+    p = db.get_project(body.project_id)
+    html = (p["current_html"] if p else "") or (body.html or "")
+    if not html:
         raise HTTPException(400, "尚无应用可发布")
+    if not p or not (p["current_html"] or ""):
+        title_hint = (body.title or (p["name"] if p else "") or "未命名应用")[:80]
+        db.ensure_project(body.project_id, title_hint, html)
+        p = db.get_project(body.project_id)
+
     slug = uuid.uuid4().hex[:10]
     latest = db.list_versions(body.project_id)
-    db.publish(slug, body.project_id, latest[0]["version_no"] if latest else None, p["current_html"], body.title or p["name"])
+    db.publish(slug, body.project_id, latest[0]["version_no"] if latest else None, html, body.title or p["name"])
     db.add_message(body.project_id, "agent", f"已发布分享链接：/p/{slug}", agent="System", kind="result", extra={"slug": slug})
     return {"ok": True, "slug": slug, "url": f"/p/{slug}"}
 

@@ -11,3 +11,4 @@ dist/
 *.png
 screenshot-*.png
 .idea/
+.git-rewrite/

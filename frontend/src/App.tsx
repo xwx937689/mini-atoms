@@ -222,7 +222,7 @@ export default function App() {
     setMessages(m => [...m, { role: 'user', agent: '', kind: 'edit', content: instruction }])
     try {
       setStatus('Agent 正在应用修改...')
-      const res = await api.edit(current.id, instruction)
+      const res = await api.edit(current.id, instruction, previewHtml || undefined)
       setPreviewHtml(res.html)
       setStatus('')
       const resultMsg: Message = {
@@ -284,7 +284,7 @@ export default function App() {
     setError('')
     setStatus('正在发布...')
     try {
-      const res = await api.publish(current.id, current.name)
+      const res = await api.publish(current.id, current.name, previewHtml || undefined)
       setPublishUrl(`${location.origin}${res.url}`)
       await api.getProject(current.id).then(p => { setMessages(p.messages || []); setCurrent(p) })
     } catch (e: any) {
