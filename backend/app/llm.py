@@ -83,6 +83,28 @@ def clean_html(text: str) -> str:
     return s.strip()
 
 
+def looks_truncated(text: str) -> bool:
+    """Detect output that was cut off mid-stream rather than merely stylistically short.
+
+    Runs on RAW model text (before clean_html repairs it), because repair masks the evidence.
+    """
+    s = (text or "").strip()
+    if not s:
+        return True
+    low = s.lower()
+    if "</html>" not in low:
+        return True
+    if low.count("<script") != low.count("</script>"):
+        return True
+    if low.count("<style") != low.count("</style>"):
+        return True
+    if "<script" in low:
+        script = s[low.rfind("<script"):]
+        if script.count("{") - script.count("}") > 2:
+            return True
+    return False
+
+
 class LLMClient:
     def __init__(self):
         self.base = config.LLM_BASE_URL
@@ -138,7 +160,29 @@ class LLMClient:
 
     async def build(self, prompt: str, plan: dict) -> str:
         user = f"原始需求：\n{prompt}\n\n已确认的应用规划：\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n\n请生成完整 HTML。"
-        return clean_html(await self.complete(prompts.SYSTEM_BUILDER, user, temperature=0.6, max_tokens=32000))
+        raw = await self.complete(prompts.SYSTEM_BUILDER, user, temperature=0.6, max_tokens=32000)
+        if looks_truncated(raw):
+            # Truncation is not a style issue - retry with explicit pressure to cut scope.
+            retry = user + (
+                "\n\n[IMPORTANT] Your previous answer was CUT OFF before </html>. "
+                "Regenerate a SHORTER, fully-closed document: implement only the 3-4 core features, "
+                "use terse CSS, and make sure the file ends with </script></body></html>."
+            )
+            raw = await self.complete(prompts.SYSTEM_BUILDER, retry, temperature=0.4, max_tokens=32000)
+        html = clean_html(raw)
+        # Oversized output makes every later edit prone to truncation.
+        # Rewrite once, more compactly, while the requirement is still in hand.
+        if len(html) > 15000:
+            shrink = user + (
+                f"\n\n[IMPORTANT] The previous result was {len(html)} characters, too long for stable "
+                "editing. Rewrite the SAME app in under 12,000 characters: keep every feature, but use "
+                "terse CSS and compact JS. The file MUST be complete and end with </script></body></html>."
+            )
+            shrunk = await self.complete(prompts.SYSTEM_BUILDER, shrink, temperature=0.3, max_tokens=32000)
+            small = clean_html(shrunk)
+            if not looks_truncated(shrunk) and 2000 < len(small) < len(html):
+                html = small
+        return html
 
     async def edit(self, original_prompt: str, current_html: str, history: list[dict], instruction: str) -> str:
         recent = "\n".join(
@@ -151,7 +195,17 @@ class LLMClient:
             f"用户最新修改要求：\n{instruction}\n\n"
             "请输出修改后的完整 HTML。"
         )
-        return clean_html(await self.complete(prompts.SYSTEM_EDITOR, user, temperature=0.5, max_tokens=32000))
+        raw = await self.complete(prompts.SYSTEM_EDITOR, user, temperature=0.5, max_tokens=32000)
+        for attempt in range(2):
+            if not looks_truncated(raw):
+                break
+            retry = user + (
+                "\n\n[IMPORTANT] Your previous answer was CUT OFF before </html>. "
+                "Return the COMPLETE document, keep total size under ~12,000 characters, "
+                "and preserve every existing feature. The file MUST end with </script></body></html>."
+            )
+            raw = await self.complete(prompts.SYSTEM_EDITOR, retry, temperature=0.3, max_tokens=32000)
+        return clean_html(raw)
 
     async def review(self, html: str) -> dict:
         """Model review. Never silently converts failure into pass.

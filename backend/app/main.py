@@ -35,23 +35,23 @@ class CreateProjectIn(BaseModel):
 
 
 class GenerateIn(BaseModel):
-    project_id: str
-    prompt: str
+    project_id: str = Field(..., max_length=64)
+    prompt: str = Field(..., min_length=1, max_length=8000)
 
 
 class EditIn(BaseModel):
-    project_id: str
-    instruction: str
+    project_id: str = Field(..., max_length=64)
+    instruction: str = Field(..., min_length=1, max_length=4000)
 
 
 class RollbackIn(BaseModel):
-    project_id: str
-    version_no: int
+    project_id: str = Field(..., max_length=64)
+    version_no: int = Field(..., ge=1)
 
 
 class PublishIn(BaseModel):
-    project_id: str
-    title: Optional[str] = None
+    project_id: str = Field(..., max_length=64)
+    title: Optional[str] = Field(default=None, max_length=80)
 
 
 class RenameIn(BaseModel):
@@ -71,82 +71,97 @@ def _ok(project_id: str) -> dict:
     return p
 
 
-async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) -> tuple[str, dict]:
-    """Unified quality gate for BOTH generate and edit.
-
-    Order: static structure check -> model review -> (one) repair -> re-check.
-    Never converts a review failure into a pass. When the reviewer itself errors,
-    the result is marked REVIEW_ERROR but a structurally-valid page is still
-    accepted (with an explicit unverified flag) so the demo does not hard-fail
-    just because the reviewer model timed out.
-
-    Returns (final_html, gate_report) or raises LLMError when unrecoverable.
-    """
+async def _run_checks(html: str) -> dict:
+    """Run ALL quality checks once: static structure, model review, browser smoke."""
     static = static_check(html)
-    review_report: dict = {"status": "skipped", "valid": True, "issues": [], "score": None}
-
     if llm.ready:
-        review_report = await llm.review(html)
-        if review_report["status"] == "ok":
-            steps.append(_activity("Reviewer", "模型审查完成" if review_report["valid"] else "模型审查发现问题",
-                                   "Review", "；".join(review_report["issues"][:3]) or f"评分 {review_report['score']:.0f}"))
-        else:
-            steps.append(_activity("Reviewer", "模型审查异常，改为仅依赖结构校验", "Review",
-                                   f"REVIEW_ERROR: {review_report.get('error', '')}"))
-
-    needs_repair = (not static["valid"]) or (review_report["status"] == "ok" and not review_report["valid"])
-    if needs_repair and allow_repair:
-        issues = list(static["issues"]) + list(review_report.get("issues") or [])
-        steps.append(_activity("Reviewer", "发现质量问题，请求修复", "Repair", "；".join(issues[:3])))
-        if llm.ready:
-            html = await llm.repair(html, issues)
-        static = static_check(html)
-        if llm.ready:
-            review_report = await llm.review(html)
-            if review_report["status"] == "ok":
-                steps.append(_activity("Reviewer", "修复后复审" + ("通过" if review_report["valid"] else "仍未通过"),
-                                       "Review", "；".join(review_report["issues"][:3]) or "无问题"))
-
-    static = static_check(html)
-    if not static["valid"]:
-        raise LLMError("结构校验未通过：" + "；".join(static["issues"][:3]))
-    if review_report["status"] == "ok" and not review_report["valid"]:
-        raise LLMError("模型审查未通过：" + "；".join(review_report["issues"][:3]))
-
-    # Optional headless-browser smoke test: catches white screens / runtime errors
-    # that no regex can. Skipped cleanly when Chromium is unavailable (e.g. free tier).
+        review = await llm.review(html)
+        if review["status"] == "error":
+            # One retry to smooth over transient model hiccups before we block.
+            review = await llm.review(html)
+        review["mode"] = "llm"
+    else:
+        m = mock.review(html)
+        review = {"status": "ok", "valid": bool(m.get("valid", True)),
+                  "issues": list(m.get("issues") or []), "score": m.get("score"), "mode": "mock"}
     browser = {"status": "skipped", "reason": "未启用"}
     if browser_check.ENABLED != "false":
         browser = await browser_check.check_app(html)
-        if browser["status"] == "ok":
-            ok = browser.get("passed", False)
-            steps.append(_activity("Reviewer", "浏览器运行验证" + ("通过" if ok else "发现问题"),
-                                   "Run browser", f"元素 {browser.get('element_count', 0)} · "
-                                                  f"交互控件 {browser.get('interactive_count', 0)} · "
-                                                  f"JS错误 {len(browser.get('js_errors') or [])}"))
-            if not ok and allow_repair:
-                issues = ["浏览器运行验证未通过"]
-                if browser.get("js_errors"):
-                    issues.append("JS 运行时错误：" + "；".join(browser["js_errors"][:2]))
-                if not browser["checks"].get("has_content"):
-                    issues.append("页面正文内容过少，疑似白屏")
-                steps.append(_activity("Reviewer", "按运行结果请求修复", "Repair", "；".join(issues[:3])))
-                if llm.ready:
-                    html = await llm.repair(html, issues)
-                    static = static_check(html)
-                    if static["valid"]:
-                        browser = await browser_check.check_app(html)
-        else:
-            steps.append(_activity("Reviewer", "浏览器验证不可用，已跳过", "Run browser", browser.get("reason", "")))
+    return {"static": static, "review": review, "browser": browser}
 
-    steps.append(_activity("Reviewer", "质量校验通过", "Run check", "HTML 结构完整"))
+
+def _judge(checks: dict) -> tuple[bool, list[str]]:
+    """Decide pass/fail plus human-readable blockers. Skipped != passed."""
+    blockers: list[str] = []
+    if not checks["static"]["valid"]:
+        blockers.extend(checks["static"]["issues"])
+    rv = checks["review"]
+    if rv["status"] == "error":
+        blockers.append(f"模型审查异常（无法确认为合格）：{rv.get('error', '')[:80]}")
+    elif rv["status"] == "ok" and not rv["valid"]:
+        blockers.extend(rv.get("issues") or ["模型审查未通过"])
+    br = checks["browser"]
+    if br["status"] == "ok" and not br.get("passed", False):
+        blockers.append("浏览器运行验证未通过")
+        blockers.extend(br.get("js_errors") or [])
+    return (len(blockers) == 0), blockers
+
+
+async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) -> tuple[str, dict]:
+    """Strict unified gate for EVERY save path (generate / edit / mock fallback).
+
+    Each round runs the FULL check set. If anything fails, repair once and
+    re-run everything - a repair is never trusted without full re-verification.
+    If it still fails, raise: no version is written, previous version survives.
+
+    Hard rule: a reviewer error (status=error) BLOCKS saving in real-AI mode.
+    It is never silently treated as "passed". Skipped browser check is reported
+    as skipped, never as passed.
+    """
+    max_rounds = 2 if allow_repair else 1
+    checks = await _run_checks(html)
+    ok, blockers = _judge(checks)
+
+    for round_no in range(max_rounds):
+        if ok:
+            break
+        if round_no == max_rounds - 1:
+            break
+        steps.append(_activity("Reviewer", "发现问题，请求修复", "Repair", "；".join(blockers[:3])))
+        html = await llm.repair(html, blockers)
+        checks = await _run_checks(html)
+        ok, blockers = _judge(checks)
+
+    rv, br = checks["review"], checks["browser"]
+    if rv["status"] == "error":
+        steps.append(_activity("Reviewer", "模型审查异常，已阻断保存", "Review", "REVIEW_ERROR"))
+    elif rv["status"] == "ok" and not rv["valid"]:
+        steps.append(_activity("Reviewer", "模型审查未通过", "Review", "；".join((rv.get("issues") or [])[:3])))
+    elif rv.get("mode") == "mock":
+        steps.append(_activity("Reviewer", "演示模式校验（非真实模型审查）", "Review", "mock_mode"))
+    else:
+        steps.append(_activity("Reviewer", "模型审查通过", "Review", f"评分 {rv.get('score') if rv.get('score') is not None else '-'}"))
+    if br["status"] == "ok":
+        steps.append(_activity("Reviewer", "浏览器运行验证" + ("通过" if br.get("passed") else "未通过"),
+                               "Run browser", f"元素 {br.get('element_count', 0)} · 交互 {br.get('interactive_count', 0)} · JS错误 {len(br.get('js_errors') or [])}"))
+    else:
+        steps.append(_activity("Reviewer", "浏览器验证 SKIPPED（非通过）", "Run browser", br.get("reason", "")))
+
+    if not ok:
+        raise LLMError("质量门禁未通过，已保留上一可用版本：" + "；".join(blockers[:3]))
+
+    steps.append(_activity("Reviewer", "质量校验通过", "Run check", "全部检查项已执行"))
     return html, {
-        "verified": review_report["status"] == "ok",
-        "review_status": review_report["status"],
-        "review_score": review_report.get("score"),
-        "static_issues": static["issues"],
-        "browser": browser,
+        "final_status": "passed" if br["status"] == "ok" else "passed_with_skips",
+        "verified": rv["status"] == "ok" and rv.get("mode") != "mock",
+        "review_status": rv["status"],
+        "review_mode": rv.get("mode"),
+        "review_score": rv.get("score"),
+        "static_issues": checks["static"]["issues"],
+        "browser": br,
+        "rounds": round_no + 1,
     }
+
 
 
 # ---------------- system ----------------
@@ -263,14 +278,18 @@ async def generate(body: GenerateIn, request: Request):
             try:
                 plan = plan if 'plan' in locals() else mock.plan(prompt)
                 html = mock.build(prompt, plan)
+                steps.append(_activity("System", "模型服务不可用，切换到演示模式生成", "Fallback", str(e)[:80]))
+                # Mock output must pass the SAME gate - no bypass on the fallback path.
+                html, gate = await quality_gate(html, steps, allow_repair=False)
                 version_no = db.next_version_no(body.project_id)
                 name = plan.get("app_name") or p["name"]
                 db.update_project_html(body.project_id, html, prompt=prompt, name=name)
                 db.add_version(body.project_id, version_no, f"V{version_no}: {name}", html, plan)
-                db.add_message(body.project_id, "agent", "模型服务不可用，已切换到演示模式生成。", agent="System", kind="result", extra={"version_no": version_no})
+                db.add_message(body.project_id, "agent", "模型服务不可用，已切换到演示模式生成。", agent="System", kind="result", extra={"version_no": version_no, "steps": steps})
                 return {
                     "ok": True, "project_id": body.project_id, "version_no": version_no,
                     "plan": plan, "html": html, "steps": steps, "mock_mode": True,
+                    "quality": score_app(html, plan), "gate": gate,
                     "fallback": True, "fallback_reason": str(e)[:200],
                 }
             except Exception as mock_err:
@@ -327,12 +346,18 @@ async def edit_app(body: EditIn, request: Request):
         if llm.ready and isinstance(e, LLMError) and "模型请求失败" in str(e):
             try:
                 html = mock.edit(p["original_prompt"], p["current_html"], history, instruction)
-                if static_check(html)["valid"]:
-                    version_no = db.next_version_no(body.project_id)
-                    db.update_project_html(body.project_id, html)
-                    db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
-                    db.add_message(body.project_id, "agent", "模型服务不可用，已用演示模式应用修改。", agent="System", kind="result", extra={"version_no": version_no})
-                    return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "mock_mode": True, "fallback": True}
+                steps.append(_activity("System", "模型服务不可用，切换到演示模式修改", "Fallback", str(e)[:80]))
+                # Same gate as the normal path - fallback must not bypass verification.
+                html, gate = await quality_gate(html, steps, allow_repair=False)
+                prev_len = len(p["current_html"] or "")
+                if prev_len >= 1500 and len(html) < prev_len * 0.65:
+                    raise LLMError(f"演示模式修改后内容缩水（{prev_len} → {len(html)}），已保留上一可用版本")
+                version_no = db.next_version_no(body.project_id)
+                db.update_project_html(body.project_id, html)
+                db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
+                db.add_message(body.project_id, "agent", "模型服务不可用，已用演示模式应用修改。", agent="System", kind="result", extra={"version_no": version_no, "steps": steps})
+                return {"ok": True, "version_no": version_no, "html": html, "steps": steps,
+                        "quality": score_app(html, None), "gate": gate, "mock_mode": True, "fallback": True}
             except Exception as mock_err:
                 e = Exception(f"{e}；演示模式也失败：{mock_err}")
         db.add_message(body.project_id, "agent", f"修改失败，已保留上一可用版本：{e}", agent="System", kind="error")

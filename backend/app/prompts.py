@@ -46,9 +46,12 @@ HARD REQUIREMENTS:
 11. Keep all state in in-memory JS variables. Do NOT use localStorage, sessionStorage,
     indexedDB, cookies or any browser storage API - the app runs in a sandboxed iframe where
     these APIs throw SecurityError and will crash your entire script. Seed data on load instead.
-12. KEEP OUTPUT COMPACT: target 250-450 lines total. Use concise CSS and compact JS.
-    NEVER produce extremely long output - you MUST finish the complete document including </body></html>.
-    Prefer a dense but complete implementation over a verbose incomplete one.
+12. KEEP OUTPUT COMPACT: target 220-360 lines, HARD CAP around 12,000 characters.
+    Completeness beats richness: a smaller app that fully works is REQUIRED; a bigger one that
+    gets cut off is worse than useless. Use terse CSS (grouped selectors, one-line rules) and
+    compact JS (short helpers, no verbose comments).
+    You MUST finish the document - always end with </script></body></html>.
+    If the feature list is long, implement the top 3-4 features well rather than 10 badly.
 
 Make it genuinely useful and visually impressive. Think: a product that could be demoed to investors.
 """

@@ -90,7 +90,14 @@ async def check_app(html: str) -> dict[str, Any]:
             "click_works": click_ok,
             "no_js_error": len(page_errors) == 0,
         }
-        passed = checks["renders"] and checks["has_content"] and checks["no_js_error"]
+        # Passing requires a real interactive page, not merely non-empty pixels.
+        # Zero interactive controls = failed smoke test.
+        passed = (
+            checks["renders"]
+            and checks["has_content"]
+            and checks["has_interactive"]
+            and checks["no_js_error"]
+        )
         return {
             "status": "ok",
             "passed": passed,

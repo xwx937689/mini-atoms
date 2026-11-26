@@ -122,5 +122,19 @@ def edit(_original: str, current_html: str, _history: list, instruction: str) ->
     return html
 
 
-def review(_html: str) -> dict:
-    return {"valid": True, "issues": [], "score": 90, "_mock": True}
+def review(html: str) -> dict:
+    """Mock-mode review: real structural judgement, NOT a rubber stamp.
+
+    Mock mode has no model to judge semantics, so it falls back to the same
+    deterministic structure checks and reports itself as mock (never as a model pass).
+    """
+    from .validator import static_check
+
+    chk = static_check(html)
+    return {
+        "valid": chk["valid"],
+        "issues": chk["issues"],
+        "score": chk["score"],
+        "_mock": True,
+        "mode": "mock",
+    }
