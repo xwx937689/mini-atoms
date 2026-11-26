@@ -215,9 +215,9 @@ export default function App() {
         mirrorDetail(p, p.messages || [], p.versions || [], res.html)
       })])
     } catch (e: any) {
-      setError(e.message || '生成失败')
+      setError('')
       setStatus('')
-      setMessages(m => [...m, { role: 'agent', agent: 'System', kind: 'error', content: `生成失败：${e.message}` }])
+      setMessages(m => [...m, { role: 'agent', agent: 'System', kind: 'error', content: e.message || '生成失败，请重试' }])
     } finally {
       setBusy(false)
     }
@@ -248,9 +248,11 @@ export default function App() {
         mirrorDetail(p, p.messages || [], p.versions || [], res.html)
       })])
     } catch (e: any) {
-      setError(e.message || '修改失败')
+      // The backend already returns a complete, actionable Chinese message.
+      // Do not re-wrap it here: that used to duplicate "已保留上一版本" two or three times.
+      setError('')
       setStatus('')
-      setMessages(m => [...m, { role: 'agent', agent: 'System', kind: 'error', content: `修改失败（已保留上一版本）：${e.message}` }])
+      setMessages(m => [...m, { role: 'agent', agent: 'System', kind: 'error', content: e.message || '修改失败，请重试' }])
     } finally {
       setBusy(false)
     }

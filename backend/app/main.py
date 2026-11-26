@@ -69,6 +69,34 @@ def _activity(agent: str, action: str, tool: str = "", detail: str = "") -> dict
     return {"agent": agent, "action": action, "tool": tool, "detail": detail}
 
 
+def _user_facing_error(e: Exception, had_previous: bool = True) -> str:
+    """Translate an internal gate/model error into an actionable Chinese message.
+
+    The raw exception carries reviewer output in English (e.g. "HTML is truncated..."),
+    which tells a user nothing. Keep the technical detail out of the UI and say what
+    happened plus what to do next.
+    """
+    s = str(e)
+    low = s.lower()
+    kept = "已保留上一版，不会影响你现在的可用版本。" if had_previous else ""
+    tail = f"\n{kept}" if kept else ""
+
+    if "truncat" in low or "截断" in s:
+        return ("模型这次输出被截断了，内容不完整，所以没有保存。" + tail +
+                "\n建议把要求拆小一点（一次只改一个功能）再试一次。")
+    if "审查异常" in s:
+        return "模型审查服务临时出错，无法确认结果是否合格，所以没有保存。" + tail + "\n请重试一次。"
+    if "审查" in s or "review" in low:
+        return "模型审查认为这次结果不合格，所以没有保存。" + tail + "\n可以换个说法重试。"
+    if "结构校验" in s:
+        return "生成的结构不完整，没有保存。" + tail + "\n请重试一次。"
+    if "缩水" in s:
+        return "这次改动的结果比原版小很多，可能丢了原有功能，所以没有保存。" + tail + "\n可以换个说法重试。"
+    if "模型请求失败" in s:
+        return "模型服务暂时不可用，本次没有保存。" + tail + "\n请稍后重试。"
+    return "这次操作没有成功，没有保存。" + tail + "\n可以重试一次；如果反复失败，把要求说得更具体些。"
+
+
 def _ok(project_id: str) -> dict:
     p = db.get_project(project_id)
     if not p:
@@ -153,7 +181,7 @@ async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) 
         steps.append(_activity("Reviewer", "浏览器验证 SKIPPED（非通过）", "Run browser", br.get("reason", "")))
 
     if not ok:
-        raise LLMError("质量门禁未通过，已保留上一可用版本：" + "；".join(blockers[:3]))
+        raise LLMError("质量门禁未通过：" + "；".join(blockers[:3]))
 
     if br["status"] == "ok":
         steps.append(_activity("Reviewer", "质量校验通过", "Run check", "结构 + 模型审查 + 浏览器验证 全部执行"))
@@ -310,8 +338,9 @@ async def generate(body: GenerateIn, request: Request):
                 }
             except Exception as mock_err:
                 e = Exception(f"{e}；演示模式也失败：{mock_err}")
-        db.add_message(body.project_id, "agent", f"生成失败：{e}", agent="System", kind="error")
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e), "steps": steps})
+        msg = _user_facing_error(e, had_previous=bool(p.get("current_html")))
+        db.add_message(body.project_id, "agent", msg, agent="System", kind="error")
+        return JSONResponse(status_code=500, content={"ok": False, "error": msg, "steps": steps})
 
 
 @app.post("/api/edit")
@@ -382,8 +411,9 @@ async def edit_app(body: EditIn, request: Request):
                         "quality": score_app(html, None), "gate": gate, "mock_mode": True, "fallback": True}
             except Exception as mock_err:
                 e = Exception(f"{e}；演示模式也失败：{mock_err}")
-        db.add_message(body.project_id, "agent", f"修改失败，已保留上一可用版本：{e}", agent="System", kind="error")
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e), "steps": steps})
+        msg = _user_facing_error(e, had_previous=bool(base_html))
+        db.add_message(body.project_id, "agent", msg, agent="System", kind="error")
+        return JSONResponse(status_code=500, content={"ok": False, "error": msg, "steps": steps})
 
 
 # ---------------- versions ----------------
