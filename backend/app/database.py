@@ -24,6 +24,13 @@ def get_conn():
         conn.execute("PRAGMA foreign_keys=ON")
         yield conn
         conn.commit()
+    except BaseException:
+        # Explicit rollback: never rely on close() to discard a half-written transaction.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
@@ -186,6 +193,44 @@ def add_version(project_id: str, version_no: int, label: str, html: str, plan: O
         )
         row = conn.execute("SELECT id,project_id,version_no,label,created_at,length(html) AS html_len FROM versions WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
+
+
+def save_project_version(
+    project_id: str,
+    version_no: int,
+    label: str,
+    html: str,
+    plan: Optional[dict] = None,
+    prompt: Optional[str] = None,
+    name: Optional[str] = None,
+) -> dict:
+    """Atomically update current_html AND append a version row.
+
+    Both writes happen inside one SQLite transaction: if either fails, neither is
+    persisted, so we can never end up with "html changed but no version recorded".
+    """
+    now = _now()
+    with get_conn() as conn:
+        if prompt is not None and name is not None:
+            conn.execute(
+                "UPDATE projects SET current_html=?, original_prompt=?, name=?, updated_at=? WHERE id=?",
+                (html, prompt, name, now, project_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE projects SET current_html=?, updated_at=? WHERE id=?",
+                (html, now, project_id),
+            )
+        cur = conn.execute(
+            "INSERT INTO versions(project_id,version_no,label,html,plan,created_at) VALUES(?,?,?,?,?,?)",
+            (project_id, version_no, label, html, json.dumps(plan or {}, ensure_ascii=False), now),
+        )
+        row = conn.execute(
+            "SELECT id,project_id,version_no,label,created_at,length(html) AS html_len FROM versions WHERE id=?",
+            (cur.lastrowid,),
+        ).fetchone()
+        version = dict(row)
+    return version
 
 
 def list_versions(project_id: str) -> list[dict]:

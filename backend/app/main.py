@@ -258,8 +258,8 @@ async def generate(body: GenerateIn, request: Request):
 
         version_no = db.next_version_no(body.project_id)
         name = plan.get("app_name") or p["name"]
-        db.update_project_html(body.project_id, html, prompt=prompt, name=name)
-        db.add_version(body.project_id, version_no, f"V{version_no}: {name}", html, plan)
+        db.save_project_version(body.project_id, version_no, f"V{version_no}: {name}", html,
+                                plan=plan, prompt=prompt, name=name)
         db.add_message(
             body.project_id, "agent", f"应用已生成并通过校验。", agent="Alex · Engineer", kind="result",
             extra={"steps": steps, "version_no": version_no},
@@ -287,8 +287,8 @@ async def generate(body: GenerateIn, request: Request):
                 html, gate = await quality_gate(html, steps, allow_repair=False)
                 version_no = db.next_version_no(body.project_id)
                 name = plan.get("app_name") or p["name"]
-                db.update_project_html(body.project_id, html, prompt=prompt, name=name)
-                db.add_version(body.project_id, version_no, f"V{version_no}: {name}", html, plan)
+                db.save_project_version(body.project_id, version_no, f"V{version_no}: {name}", html,
+                                        plan=plan, prompt=prompt, name=name)
                 db.add_message(body.project_id, "agent", "模型服务不可用，已切换到演示模式生成。", agent="System", kind="result", extra={"version_no": version_no, "steps": steps})
                 return {
                     "ok": True, "project_id": body.project_id, "version_no": version_no,
@@ -340,8 +340,7 @@ async def edit_app(body: EditIn, request: Request):
         quality = score_app(html, None)
 
         version_no = db.next_version_no(body.project_id)
-        db.update_project_html(body.project_id, html)
-        db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
+        db.save_project_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
         db.add_message(body.project_id, "agent", "修改已完成并生成新版本。", agent="Alex · Engineer", kind="result", extra={"steps": steps, "version_no": version_no})
         return {"ok": True, "version_no": version_no, "html": html, "steps": steps, "quality": quality, "gate": gate, "mock_mode": not llm.ready}
     except Exception as e:
@@ -357,8 +356,7 @@ async def edit_app(body: EditIn, request: Request):
                 if prev_len >= 1500 and len(html) < prev_len * 0.65:
                     raise LLMError(f"演示模式修改后内容缩水（{prev_len} → {len(html)}），已保留上一可用版本")
                 version_no = db.next_version_no(body.project_id)
-                db.update_project_html(body.project_id, html)
-                db.add_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
+                db.save_project_version(body.project_id, version_no, f"V{version_no}: {instruction[:24]}", html)
                 db.add_message(body.project_id, "agent", "模型服务不可用，已用演示模式应用修改。", agent="System", kind="result", extra={"version_no": version_no, "steps": steps})
                 return {"ok": True, "version_no": version_no, "html": html, "steps": steps,
                         "quality": score_app(html, None), "gate": gate, "mock_mode": True, "fallback": True}

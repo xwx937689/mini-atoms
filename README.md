@@ -60,12 +60,12 @@
 ```bash
 cd backend
 pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest -v          # 29 个用例，无需 API Key / 网络
+python -m pytest -v          # 35 个用例，无需 API Key / 网络
 ```
 
-覆盖：质量门禁各分支（通过/不通过/审查异常/浏览器失败/skipped）、修复后完整复验、Mock 模式不谎报、
-门禁失败不写版本、截断检测与拒绝、发布页 CSP 与 sandbox、输入长度与限流。
-浏览器相关用例在无 Chromium 环境下自动 skip（不伪造通过）。
+覆盖：质量门禁各分支（通过 / 不通过 / 审查异常 / 浏览器失败 / skipped）、修复后完整复验、
+Mock 模式不谎报、**接口级失败不写库**、**事务原子性（写一半失败整体回滚）**、截断检测与拒绝、
+发布页 CSP 与 sandbox、输入长度与限流。浏览器相关用例在无 Chromium 环境下自动 skip（不伪造通过）。
 
 ### L2 软评分（衡量好不好）
 
