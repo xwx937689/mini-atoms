@@ -74,6 +74,15 @@ export default function App() {
   const [error, setError] = useState('')
   const [mockMode, setMockMode] = useState(false)
   const [publishUrl, setPublishUrl] = useState('')
+  // Latest publish slug recovered from conversation history, so refreshing the page
+  // does not lose the "open link" entry point.
+  const publishedUrlFromHistory = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const slug = messages[i]?.extra?.slug
+      if (slug) return `${location.origin}/p/${slug}`
+    }
+    return ''
+  })()
   const [firstLoad, setFirstLoad] = useState(true)
   const chatRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -531,8 +540,9 @@ export default function App() {
                   <RefreshCw size={13} /> 刷新
                 </button>
               )}
-              {publishUrl && (
-                <a href={publishUrl} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] text-indigo-600 hover:bg-indigo-50 rounded-md">
+              {/* Derive from message history so the button survives a page refresh. */}
+              {(publishUrl || publishedUrlFromHistory) && (
+                <a href={publishUrl || publishedUrlFromHistory} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] text-indigo-600 hover:bg-indigo-50 rounded-md">
                   <ExternalLink size={13} /> 打开链接
                 </a>
               )}
@@ -739,6 +749,32 @@ function ActivityRow({ step }: { step: Activity }) {
   )
 }
 
+function PublishedLink({ slug }: { slug: string }) {
+  const [copied, setCopied] = useState(false)
+  const url = `${location.origin}/p/${slug}`
+  return (
+    <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-2.5 py-2">
+      <div className="flex items-center gap-1.5 text-[10px] font-medium text-emerald-700 mb-1">
+        <ExternalLink size={11} /> 已发布 · 任何人都能打开这个链接
+      </div>
+      <div className="flex items-center gap-2">
+        <a href={url} target="_blank" rel="noreferrer" className="flex-1 min-w-0 text-[11px] text-indigo-600 underline truncate">
+          {url}
+        </a>
+        <button
+          onClick={async () => {
+            try { await navigator.clipboard.writeText(url) } catch { /* 忽略剪贴板权限失败 */ }
+            setCopied(true); setTimeout(() => setCopied(false), 1500)
+          }}
+          className="shrink-0 flex items-center gap-1 px-2 py-1 text-[10px] bg-white border border-gray-200 rounded-md hover:bg-gray-50"
+        >
+          {copied ? <><Check size={10} className="text-emerald-600" />已复制</> : <><Copy size={10} />复制</>}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function ResultCard({ msg, meta }: { msg: Message; meta: { color: string; bg: string; short: string } }) {
   const [open, setOpen] = useState(false)
   const [qualityOpen, setQualityOpen] = useState(false)
@@ -752,6 +788,7 @@ function ResultCard({ msg, meta }: { msg: Message; meta: { color: string; bg: st
           <CheckCircle2 size={13} className="text-emerald-500 shrink-0 mt-0.5" />
           {msg.content}
         </div>
+        {msg.extra?.slug && <PublishedLink slug={msg.extra.slug} />}
         {quality && (
           <div className="mt-2 rounded-lg border border-indigo-100 bg-indigo-50/40 overflow-hidden">
             <button onClick={() => setQualityOpen(o => !o)} className="w-full flex items-center gap-2 px-2.5 py-2 text-left">

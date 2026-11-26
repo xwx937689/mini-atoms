@@ -436,7 +436,7 @@ async def publish(body: PublishIn, request: Request):
     slug = uuid.uuid4().hex[:10]
     latest = db.list_versions(body.project_id)
     db.publish(slug, body.project_id, latest[0]["version_no"] if latest else None, html, body.title or p["name"])
-    db.add_message(body.project_id, "agent", f"已发布分享链接：/p/{slug}", agent="System", kind="result", extra={"slug": slug})
+    db.add_message(body.project_id, "agent", "已发布，可通过下方链接访问（无需登录）。", agent="System", kind="result", extra={"slug": slug})
     return {"ok": True, "slug": slug, "url": f"/p/{slug}"}
 
 
