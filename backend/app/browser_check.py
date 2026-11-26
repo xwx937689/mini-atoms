@@ -69,33 +69,57 @@ async def check_app(html: str) -> dict[str, Any]:
             )
 
             # 4) try one real click on the first visible button; ensure no crash
+            # Distinguish "no button to click" from "button exists but click failed" -
+            # the former is legitimately fine for non-button UIs, the latter is a real defect.
+            click_attempted = False
             click_ok = False
-            try:
-                btns = await page.query_selector_all("button")
-                for b in btns[:5]:
-                    if await b.is_visible():
-                        await b.click(timeout=2500)
-                        click_ok = True
-                        break
-            except Exception:
-                click_ok = False
+            clicks = 0
+            for b in (await page.query_selector_all("button"))[:5]:
+                if not await b.is_visible():
+                    continue
+                click_attempted = True
+                before = len(page_errors)
+                try:
+                    await b.click(timeout=2500)
+                except Exception:
+                    click_ok = False
+                    break
+                # Playwright's click() resolves even when the handler throws, because the
+                # event was dispatched. Real check: did the handler raise a NEW page error?
+                await page.wait_for_timeout(250)
+                if len(page_errors) > before:
+                    click_ok = False
+                    break
+                click_ok = True
+                clicks += 1
+                if clicks >= 2:
+                    break
 
             await ctx.close()
             await browser.close()
+
+        # Console "errors" include harmless noise (favicon 404, blocked external assets).
+        # Only treat genuine runtime exceptions as failures.
+        _runtime_markers = ("uncaught", "typeerror", "referenceerror", "syntaxerror", "is not a function", "is not defined")
+        real_console_errors = [
+            e for e in console_errors if any(mk in e.lower() for mk in _runtime_markers)
+        ]
 
         checks = {
             "renders": text_len > 20 or elem_count > 5,
             "has_content": text_len > 20 or elem_count >= 8,
             "has_interactive": interactive >= 1,
-            "click_works": click_ok,
-            "no_js_error": len(page_errors) == 0,
+            # True when there was no button (not applicable) OR the click succeeded.
+            "click_works": (not click_attempted) or click_ok,
+            "no_js_error": len(page_errors) == 0 and len(real_console_errors) == 0,
         }
-        # Passing requires a real interactive page, not merely non-empty pixels.
-        # Zero interactive controls = failed smoke test.
+        # Passing requires a real interactive page, not merely non-empty pixels:
+        # it must render, have content, have a working interactive control, and throw no runtime errors.
         passed = (
             checks["renders"]
             and checks["has_content"]
             and checks["has_interactive"]
+            and checks["click_works"]
             and checks["no_js_error"]
         )
         return {
@@ -105,8 +129,10 @@ async def check_app(html: str) -> dict[str, Any]:
             "text_len": text_len,
             "element_count": elem_count,
             "interactive_count": interactive,
+            "click_attempted": click_attempted,
             "js_errors": page_errors[:3],
-            "console_errors": console_errors[:3],
+            "console_errors": real_console_errors[:3],
+            "console_ignored": [e for e in console_errors if e not in real_console_errors][:3],
         }
     except Exception as e:
         return {"status": "skipped", "reason": f"检查异常: {str(e)[:120]}", "checks": {}}

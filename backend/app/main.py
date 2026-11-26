@@ -150,7 +150,11 @@ async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) 
     if not ok:
         raise LLMError("质量门禁未通过，已保留上一可用版本：" + "；".join(blockers[:3]))
 
-    steps.append(_activity("Reviewer", "质量校验通过", "Run check", "全部检查项已执行"))
+    if br["status"] == "ok":
+        steps.append(_activity("Reviewer", "质量校验通过", "Run check", "结构 + 模型审查 + 浏览器验证 全部执行"))
+    else:
+        steps.append(_activity("Reviewer", "质量校验完成（部分检查未执行）", "Run check",
+                               "浏览器验证不可用，已跳过；仅完成结构校验与模型审查"))
     return html, {
         "final_status": "passed" if br["status"] == "ok" else "passed_with_skips",
         "verified": rv["status"] == "ok" and rv.get("mode") != "mock",

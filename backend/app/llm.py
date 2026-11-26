@@ -100,7 +100,10 @@ def looks_truncated(text: str) -> bool:
         return True
     if "<script" in low:
         script = s[low.rfind("<script"):]
-        if script.count("{") - script.count("}") > 2:
+        # Braces must balance in valid JS. A small positive surplus means the file was
+        # cut inside a block. A negative surplus or zero is fine (braces in strings/regex
+        # can add a little noise, hence only flagging a surplus).
+        if script.count("{") - script.count("}") > 0:
             return True
     return False
 
@@ -169,6 +172,10 @@ class LLMClient:
                 "use terse CSS, and make sure the file ends with </script></body></html>."
             )
             raw = await self.complete(prompts.SYSTEM_BUILDER, retry, temperature=0.4, max_tokens=32000)
+            if looks_truncated(raw):
+                # Still cut off after a retry. Closing tags cannot restore lost JS logic,
+                # so refuse outright instead of letting clean_html paper over it.
+                raise LLMError("模型连续两次输出被截断，未生成完整文档。已放弃本次结果，请重试或简化需求。")
         html = clean_html(raw)
         # Oversized output makes every later edit prone to truncation.
         # Rewrite once, more compactly, while the requirement is still in hand.
@@ -205,6 +212,9 @@ class LLMClient:
                 "and preserve every existing feature. The file MUST end with </script></body></html>."
             )
             raw = await self.complete(prompts.SYSTEM_EDITOR, retry, temperature=0.3, max_tokens=32000)
+        if looks_truncated(raw):
+            # Never let clean_html close tags on a half-written script and call it done.
+            raise LLMError("模型连续多次输出被截断，修改结果不完整。已放弃本次修改，原版本保留。")
         return clean_html(raw)
 
     async def review(self, html: str) -> dict:
