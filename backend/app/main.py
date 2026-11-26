@@ -175,8 +175,10 @@ async def quality_gate(html: str, steps: list[dict], allow_repair: bool = True) 
 
 # ---------------- system ----------------
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health():
+    """Health probe. Accepts HEAD too: uptime monitors (UptimeRobot etc.) default to HEAD,
+    and a GET-only route answers them with 405, which looks like the service is down."""
     return {"status": "ok", "llm_ready": llm.ready, "model": config.LLM_MODEL}
 
 
