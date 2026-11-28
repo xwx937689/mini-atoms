@@ -12,6 +12,13 @@ class LLMError(Exception):
     pass
 
 
+# deepseek-chat hard-caps output at 8192 tokens; asking for more does not help and makes the
+# model believe it has room to write a very long file (it does not - it gets cut off).
+MODEL_MAX_OUTPUT = 8192
+# Roughly what 8192 tokens buys in this density of HTML/CSS/JS. Used to enforce scope.
+SAFE_HTML_CHARS = 12000
+
+
 def _extract_json(text: str) -> Any:
     """Best-effort JSON extraction from a model reply."""
     text = (text or "").strip()
@@ -163,17 +170,26 @@ class LLMClient:
 
     async def build(self, prompt: str, plan: dict) -> str:
         user = f"原始需求：\n{prompt}\n\n已确认的应用规划：\n{json.dumps(plan, ensure_ascii=False, indent=2)}\n\n请生成完整 HTML。"
-        raw = await self.complete(prompts.SYSTEM_BUILDER, user, temperature=0.6, max_tokens=32000)
+        raw = await self.complete(prompts.SYSTEM_BUILDER, user, temperature=0.6, max_tokens=MODEL_MAX_OUTPUT)
         if looks_truncated(raw):
-            # Truncation is not a style issue - retry with explicit pressure to cut scope.
-            retry = user + (
-                "\n\n[IMPORTANT] Your previous answer was CUT OFF before </html>. "
-                "Regenerate a SHORTER, fully-closed document: implement only the 3-4 core features, "
-                "use terse CSS, and make sure the file ends with </script></body></html>."
+            # Telling the model "be shorter" is not enough - it re-plans the same scope.
+            # Cut the plan itself so the retry has materially less to build.
+            feats = list(plan.get("features") or [])
+            reduced = dict(plan)
+            reduced["features"] = feats[:4]
+            reduced["pages"] = (plan.get("pages") or [])[:2]
+            reduced["components"] = (plan.get("components") or [])[:5]
+            retry = (
+                f"原始需求：\n{prompt}\n\n"
+                f"上一轮输出在 </html> 之前被截断了，必须缩减范围。只实现下列规划（其余放弃）：\n"
+                f"{json.dumps(reduced, ensure_ascii=False, indent=2)}\n\n"
+                "[硬性要求] 完整 HTML 控制在 11,000 字符以内。只做上面列出的功能，"
+                "宁可少做也要保证从 <!DOCTYPE html> 到 </html> 完整闭合。"
+                "未实现的功能不要画入口，不要写半截函数。"
             )
-            raw = await self.complete(prompts.SYSTEM_BUILDER, retry, temperature=0.4, max_tokens=32000)
+            raw = await self.complete(prompts.SYSTEM_BUILDER, retry, temperature=0.35, max_tokens=MODEL_MAX_OUTPUT)
             if looks_truncated(raw):
-                # Still cut off after a retry. Closing tags cannot restore lost JS logic,
+                # Still cut off. Closing tags cannot restore lost JS logic,
                 # so refuse outright instead of letting clean_html paper over it.
                 raise LLMError("模型连续两次输出被截断，未生成完整文档。已放弃本次结果，请重试或简化需求。")
         html = clean_html(raw)
@@ -185,7 +201,7 @@ class LLMClient:
                 "editing. Rewrite the SAME app in under 12,000 characters: keep every feature, but use "
                 "terse CSS and compact JS. The file MUST be complete and end with </script></body></html>."
             )
-            shrunk = await self.complete(prompts.SYSTEM_BUILDER, shrink, temperature=0.3, max_tokens=32000)
+            shrunk = await self.complete(prompts.SYSTEM_BUILDER, shrink, temperature=0.3, max_tokens=MODEL_MAX_OUTPUT)
             small = clean_html(shrunk)
             if not looks_truncated(shrunk) and 2000 < len(small) < len(html):
                 html = small
@@ -195,23 +211,39 @@ class LLMClient:
         recent = "\n".join(
             f"{m.get('agent') or m.get('role')}: {m.get('content', '')[:400]}" for m in history[-8:]
         )
+        # Give the model a concrete character budget instead of a vague "keep it short".
+        # If the base file is already near the ceiling, the edit must also trim, not just add.
+        cur_len = len(current_html)
+        over = cur_len > SAFE_HTML_CHARS
+        budget = SAFE_HTML_CHARS if over else cur_len + 1200
+        if over:
+            budget_note = (
+                f"\n\n[输出预算] 当前文件 {cur_len} 字符，已接近上限。本次输出必须 ≤ {budget} 字符。"
+                "这意味着要边加边减：加入新功能的同时，删掉冗余样式和重复代码，保持所有已有功能可用。"
+            )
+        else:
+            budget_note = (
+                f"\n\n[输出预算] 当前文件 {cur_len} 字符。本次输出 ≤ {budget} 字符，"
+                "优先复用现有 CSS 类，不要重写整个页面。"
+            )
         user = (
             f"原始需求：\n{original_prompt}\n\n"
             f"近期对话（按时间顺序）：\n{recent or '（无）'}\n\n"
             f"当前 HTML（完整）：\n{current_html}\n\n"
             f"用户最新修改要求：\n{instruction}\n\n"
-            "请输出修改后的完整 HTML。"
+            "请输出修改后的完整 HTML。" + budget_note
         )
-        raw = await self.complete(prompts.SYSTEM_EDITOR, user, temperature=0.5, max_tokens=32000)
+        raw = await self.complete(prompts.SYSTEM_EDITOR, user, temperature=0.5, max_tokens=MODEL_MAX_OUTPUT)
         for attempt in range(2):
             if not looks_truncated(raw):
                 break
             retry = user + (
-                "\n\n[IMPORTANT] Your previous answer was CUT OFF before </html>. "
-                "Return the COMPLETE document, keep total size under ~12,000 characters, "
-                "and preserve every existing feature. The file MUST end with </script></body></html>."
+                f"\n\n[IMPORTANT] 上一轮输出在 </html> 之前被截断了。"
+                f"这次必须把总长度控制在 {budget} 字符以内：只做最小可用实现（加控件 + 最简逻辑，"
+                "复用现有样式），并在加入新功能时删掉等量的冗余代码。"
+                "务必完整闭合到 </script></body></html>。"
             )
-            raw = await self.complete(prompts.SYSTEM_EDITOR, retry, temperature=0.3, max_tokens=32000)
+            raw = await self.complete(prompts.SYSTEM_EDITOR, retry, temperature=0.3, max_tokens=MODEL_MAX_OUTPUT)
         if looks_truncated(raw):
             # Never let clean_html close tags on a half-written script and call it done.
             raise LLMError("模型连续多次输出被截断，修改结果不完整。已放弃本次修改，原版本保留。")
@@ -251,4 +283,4 @@ class LLMClient:
 
     async def repair(self, html: str, issues: list[str]) -> str:
         user = f"问题清单：\n{json.dumps(issues, ensure_ascii=False)}\n\n有问题的 HTML：\n{html}"
-        return clean_html(await self.complete(prompts.SYSTEM_REPAIR, user, temperature=0.4, max_tokens=32000))
+        return clean_html(await self.complete(prompts.SYSTEM_REPAIR, user, temperature=0.4, max_tokens=MODEL_MAX_OUTPUT))

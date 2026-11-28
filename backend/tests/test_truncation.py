@@ -67,3 +67,44 @@ async def test_build_succeeds_on_retry(monkeypatch, good_html):
     html = await client.build("生成一个看板", {"app_name": "x", "features": []})
     assert "</html>" in html
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_build_retry_actually_cuts_scope(monkeypatch, good_html):
+    """Saying "be shorter" is not enough - the retry must drop features from the plan.
+
+    Otherwise the model re-plans the same oversized app and truncates again.
+    """
+    client = LLMClient()
+    client.ready = True
+    seen = []
+    calls = {"n": 0}
+
+    async def fake_complete(system, user, **kw):
+        seen.append(user)
+        calls["n"] += 1
+        return '<html><body><script>x=' if calls["n"] == 1 else good_html
+    monkeypatch.setattr(client, "complete", fake_complete)
+
+    plan = {
+        "app_name": "电商", "summary": "s",
+        "features": ["登录", "商品展示", "购物车", "下单支付", "订单管理", "优惠券", "评价"],
+        "pages": ["首页", "购物车", "订单", "个人中心"],
+        "components": ["nav", "card", "modal", "table", "chart", "footer"],
+        "layout": "", "style": "", "data": [], "acceptance": [],
+    }
+    await client.build("做个电商系统", plan)
+
+    retry_prompt = seen[1]
+    # 只保留前 4 项，其余裁掉
+    assert "登录" in retry_prompt
+    assert "商品展示" in retry_prompt
+    assert "购物车" in retry_prompt
+    assert "下单支付" in retry_prompt
+    assert "订单管理" not in retry_prompt, "第 5 项起应被裁掉"
+    assert "优惠券" not in retry_prompt
+    assert "评价" not in retry_prompt
+    # pages / components 也要收敛
+    assert "个人中心" not in retry_prompt
+    # 预算必须写死在提示里，而不是只说"短一点"
+    assert "字符" in retry_prompt
